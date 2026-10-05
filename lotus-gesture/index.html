@@ -1,0 +1,364 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Lotus Bloom Gesture</title>
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<style>
+  html,body{margin:0;height:100%;background:#03050c;overflow:hidden;font-family:system-ui,sans-serif;color:#dfe6ff}
+  #scene{position:fixed;inset:0;width:100%;height:100%;display:block}
+  #camWrap{position:fixed;right:14px;bottom:14px;width:26vw;max-width:340px;min-width:180px;aspect-ratio:4/3;
+    border-radius:10px;overflow:hidden;border:1px solid #2b3566;background:#000;z-index:3}
+  #camWrap video,#camWrap canvas{position:absolute;inset:0;width:100%;height:100%;transform:scaleX(-1);object-fit:cover}
+  #hud{position:fixed;left:16px;top:14px;z-index:3;font-size:13px;line-height:1.55;max-width:330px;
+    background:rgba(5,8,20,.55);padding:10px 14px;border-radius:10px;backdrop-filter:blur(4px)}
+  #hud h1{font-size:16px;margin:0 0 4px;color:#fff;letter-spacing:.5px}
+  #hud .k{color:#ff9ac4}
+  #status{color:#ffd37a}
+  #hud input{width:180px;vertical-align:middle}
+  .hide{display:none}
+</style>
+<script type="importmap">
+{ "imports": {
+  "three": "https://cdn.jsdelivr.net/npm/three@0.166.0/build/three.module.js",
+  "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.166.0/examples/jsm/"
+} }
+</script>
+</head>
+<body>
+<canvas id="scene"></canvas>
+<div id="camWrap"><video id="cam" autoplay muted playsinline></video><canvas id="overlay"></canvas></div>
+<div id="hud">
+  <h1>Lotus Bloom</h1>
+  <span class="k">Right hand</span>: open = bloom, fist = close<br>
+  <span class="k">Left hand</span>: move left/right = spin, up/down = colour<br>
+  One hand only? It controls the bloom.<br>
+  <span id="status">Loading…</span><br>
+  Bloom <span id="val">0%</span> &nbsp; <input id="slider" type="range" min="0" max="100" value="0"><br>
+  <small>D = auto demo &nbsp; H = hide panel &nbsp; drag = orbit, wheel = zoom</small>
+</div>
+
+<script type="module">
+import * as THREE from 'three';
+import { EffectComposer } from 'three/addons/postprocessing/EffectComposer.js';
+import { RenderPass } from 'three/addons/postprocessing/RenderPass.js';
+import { UnrealBloomPass } from 'three/addons/postprocessing/UnrealBloomPass.js';
+import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+
+/* ---------------- tweakables ---------------- */
+const OPEN_MIN = 1.10;   // finger-spread ratio of a closed fist
+const OPEN_MAX = 1.80;   // ratio of a fully open hand
+const SMOOTH   = 5;      // higher = snappier bloom
+const RINGS = [          // lotus petal rings, outer -> inner
+  { n: 8, len: 1.00, open: 1.55, closed: 0.18, curlOpen: -1.10 },
+  { n: 8, len: 0.90, open: 1.15, closed: 0.14, curlOpen: -0.90 },
+  { n: 6, len: 0.75, open: 0.80, closed: 0.10, curlOpen: -0.60 },
+  { n: 5, len: 0.55, open: 0.45, closed: 0.06, curlOpen: -0.30 },
+];
+
+const $ = id => document.getElementById(id);
+const statusEl = $('status'), valEl = $('val'), slider = $('slider');
+const clamp = (x, a = 0, b = 1) => Math.min(b, Math.max(a, x));
+const lerp = THREE.MathUtils.lerp;
+const smooth = x => x * x * (3 - 2 * x);
+
+/* ---------------- renderer / scene ---------------- */
+const canvas = $('scene');
+const renderer = new THREE.WebGLRenderer({ canvas, antialias: true });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 1.5));
+renderer.toneMapping = THREE.ACESFilmicToneMapping;
+const scene = new THREE.Scene();
+scene.background = new THREE.Color(0x03050c);
+scene.fog = new THREE.FogExp2(0x03050c, 0.06);
+const camera = new THREE.PerspectiveCamera(45, 1, 0.1, 100);
+camera.position.set(0, 1.9, 4.2);
+const controls = new OrbitControls(camera, canvas);
+controls.target.set(0, 0.9, 0);
+controls.enableDamping = true;
+controls.maxPolarAngle = Math.PI * 0.52;
+controls.minDistance = 2; controls.maxDistance = 9;
+
+const composer = new EffectComposer(renderer);
+composer.addPass(new RenderPass(scene, camera));
+const bloomPass = new UnrealBloomPass(new THREE.Vector2(256, 256), 0.7, 0.6, 0.25);
+composer.addPass(bloomPass);
+
+scene.add(new THREE.HemisphereLight(0x8fa8ff, 0x101020, 0.5));
+const sun = new THREE.DirectionalLight(0xbcd0ff, 0.7); sun.position.set(2, 4, 3); scene.add(sun);
+const glow = new THREE.PointLight(0xff5fa0, 1, 7, 1.6); glow.position.set(0, 1.0, 0); scene.add(glow);
+
+/* ---------------- pond ---------------- */
+const water = new THREE.Mesh(
+  new THREE.CircleGeometry(9, 64),
+  new THREE.MeshStandardMaterial({ color: 0x0a1630, metalness: 0.7, roughness: 0.22 }));
+water.rotation.x = -Math.PI / 2; scene.add(water);
+
+const ripples = [];
+for (let i = 0; i < 3; i++) {
+  const m = new THREE.Mesh(new THREE.RingGeometry(0.97, 1, 80),
+    new THREE.MeshBasicMaterial({ color: 0xff8fc0, transparent: true, opacity: 0, side: THREE.DoubleSide, depthWrite: false }));
+  m.rotation.x = -Math.PI / 2; m.position.y = 0.004; scene.add(m); ripples.push(m);
+}
+
+const padMat = new THREE.MeshStandardMaterial({ color: 0x1f6b43, roughness: 0.6, side: THREE.DoubleSide });
+[[1.9, 0.6, 0.55], [-1.7, 1.1, 0.7], [0.8, -2.0, 0.6], [-1.2, -1.6, 0.45], [2.8, -1.0, 0.5]].forEach(([x, z, r], i) => {
+  const pad = new THREE.Mesh(new THREE.CircleGeometry(r, 32, i, Math.PI * 2 - 0.35), padMat);
+  pad.rotation.x = -Math.PI / 2; pad.position.set(x, 0.012 + i * 0.001, z); scene.add(pad);
+});
+
+/* ---------------- lotus ---------------- */
+const lotus = new THREE.Group(); lotus.position.y = 0.45; scene.add(lotus);
+const stem = new THREE.Mesh(new THREE.CylinderGeometry(0.035, 0.05, 1.6, 12),
+  new THREE.MeshStandardMaterial({ color: 0x2e8a52, roughness: 0.6 }));
+stem.position.y = -0.8; lotus.add(stem);
+
+const SU = 12, SV = 6;
+const petalMat = new THREE.MeshStandardMaterial({
+  vertexColors: true, side: THREE.DoubleSide, roughness: 0.5, emissive: 0xff3a80, emissiveIntensity: 0.18 });
+
+function makePetalGeometry() {
+  const g = new THREE.BufferGeometry();
+  const nV = (SU + 1) * (SV + 1);
+  g.setAttribute('position', new THREE.BufferAttribute(new Float32Array(nV * 3), 3));
+  g.setAttribute('color', new THREE.BufferAttribute(new Float32Array(nV * 3), 3));
+  const idx = [];
+  for (let i = 0; i < SU; i++) for (let j = 0; j < SV; j++) {
+    const a = i * (SV + 1) + j, b = a + 1, c = a + SV + 1, d = c + 1;
+    idx.push(a, c, b, b, c, d);
+  }
+  g.setIndex(idx);
+  return g;
+}
+
+const petals = [];
+RINGS.forEach((ring, ri) => {
+  ring.r0 = 0.04 + ri * 0.012; ring.y0 = ri * 0.025; ring.w = ring.len * 0.2;
+  for (let i = 0; i < ring.n; i++) {
+    const mesh = new THREE.Mesh(makePetalGeometry(), petalMat);
+    const phi = (i / ring.n) * Math.PI * 2 + ri * 0.4;
+    mesh.rotation.y = phi;
+    mesh.frustumCulled = false;
+    lotus.add(mesh);
+    petals.push({ mesh, ring, ri });
+  }
+});
+
+const cBase = new THREE.Color(), cMid = new THREE.Color(), cTip = new THREE.Color(), cTmp = new THREE.Color();
+let hue = 0.93, colouredHue = -1;
+
+function paintPetals() {
+  cBase.setHSL(hue, 0.15, 0.96);
+  cMid.setHSL(hue, 0.55, 0.80);
+  cTip.setHSL(hue, 0.92, 0.58);
+  petalMat.emissive.setHSL(hue, 0.85, 0.4);
+  glow.color.setHSL(hue, 0.9, 0.62);
+  ripples.forEach(r => r.material.color.setHSL(hue, 0.8, 0.7));
+  for (const p of petals) {
+    const col = p.mesh.geometry.attributes.color.array; let k = 0;
+    for (let i = 0; i <= SU; i++) {
+      const s = i / SU;
+      if (s < 0.45) cTmp.lerpColors(cBase, cMid, smooth(s / 0.45));
+      else cTmp.lerpColors(cMid, cTip, smooth((s - 0.45) / 0.55));
+      for (let j = 0; j <= SV; j++) { col[k++] = cTmp.r; col[k++] = cTmp.g; col[k++] = cTmp.b; }
+    }
+    p.mesh.geometry.attributes.color.needsUpdate = true;
+  }
+  colouredHue = hue;
+}
+
+function updatePetal(p, bloom) {
+  const { ring, ri } = p;
+  const b = smooth(clamp((bloom - ri * 0.1) / 0.7));       // outer rings open first
+  const a0 = lerp(ring.closed, ring.open, b);
+  const curl = lerp(-0.55, ring.curlOpen, b);
+  const cup = lerp(0.5, 0.9, b);
+  const g = p.mesh.geometry, pos = g.attributes.position.array;
+  let r = ring.r0, y = ring.y0, k = 0;
+  for (let i = 0; i <= SU; i++) {
+    const s = i / SU, a = a0 + curl * s * s;
+    if (i > 0) {
+      const sm = (i - 0.5) / SU, am = a0 + curl * sm * sm;
+      r += Math.sin(am) * ring.len / SU; y += Math.cos(am) * ring.len / SU;
+    }
+    const w = ring.w * Math.pow(Math.sin(Math.PI * Math.pow(s, 0.75)), 0.9);
+    const nr = -Math.cos(a), ny = Math.sin(a);               // inward/up normal
+    for (let j = 0; j <= SV; j++) {
+      const v = (j / SV) * 2 - 1, cupD = v * v * w * cup;
+      pos[k++] = r + nr * cupD; pos[k++] = y + ny * cupD; pos[k++] = v * w;
+    }
+  }
+  g.attributes.position.needsUpdate = true;
+  g.computeVertexNormals();
+}
+
+// seed pod + stamens
+const pod = new THREE.Mesh(new THREE.CylinderGeometry(0.1, 0.07, 0.1, 24),
+  new THREE.MeshStandardMaterial({ color: 0xc8d86a, emissive: 0x556610, roughness: 0.6 }));
+pod.position.y = 0.16; lotus.add(pod);
+const stamens = [];
+const fil = new THREE.CylinderGeometry(0.005, 0.005, 0.3, 5); fil.translate(0, 0.15, 0);
+const anth = new THREE.SphereGeometry(0.016, 8, 6);
+const filMat = new THREE.MeshStandardMaterial({ color: 0xffe9a0, emissive: 0x806000 });
+const antMat = new THREE.MeshStandardMaterial({ color: 0xffc400, emissive: 0xa06a00 });
+for (let i = 0; i < 40; i++) {
+  const grp = new THREE.Group();
+  grp.add(new THREE.Mesh(fil, filMat));
+  const an = new THREE.Mesh(anth, antMat); an.position.y = 0.3; grp.add(an);
+  grp.position.y = 0.17;
+  grp.rotation.set(0, Math.random() * Math.PI * 2, 0);
+  grp.userData = { tilt: 0.2 + Math.random() * 0.55, size: 0.7 + Math.random() * 0.5 };
+  const holder = new THREE.Group(); holder.add(grp); holder.rotation.y = Math.random() * 6.28;
+  grp.rotation.z = grp.userData.tilt;
+  lotus.add(holder); stamens.push(grp);
+}
+
+// fireflies
+const FF = 160, ffPos = new Float32Array(FF * 3), ffSeed = [];
+for (let i = 0; i < FF; i++) {
+  const a = Math.random() * 6.28, r = 0.6 + Math.random() * 3.2;
+  ffPos.set([Math.cos(a) * r, Math.random() * 2.6, Math.sin(a) * r], i * 3);
+  ffSeed.push(Math.random() * 10);
+}
+const ffGeo = new THREE.BufferGeometry(); ffGeo.setAttribute('position', new THREE.BufferAttribute(ffPos, 3));
+const ffMat = new THREE.PointsMaterial({ size: 0.035, color: 0xffd9a0, transparent: true, opacity: 0.2,
+  blending: THREE.AdditiveBlending, depthWrite: false });
+scene.add(new THREE.Points(ffGeo, ffMat));
+
+/* ---------------- hand tracking ---------------- */
+const video = $('cam'), overlay = $('overlay'), octx = overlay.getContext('2d');
+let landmarker = null, lastVideoTime = -1, lastHandSeen = 0;
+let bloomTarget = 0, bloom = 0, spinTarget = null, debug = false, manual = false;
+const dist = (a, b) => Math.hypot(a.x - b.x, a.y - b.y);
+
+function openness(lm) {
+  const palm = dist(lm[0], lm[9]) || 1e-6;
+  const avg = [8, 12, 16, 20].reduce((s, i) => s + dist(lm[i], lm[0]), 0) / 4 / palm;
+  return clamp((avg - OPEN_MIN) / (OPEN_MAX - OPEN_MIN));
+}
+
+async function initHands() {
+  try {
+    statusEl.textContent = 'Starting camera…';
+    const stream = await navigator.mediaDevices.getUserMedia({ video: { width: 640, height: 480, facingMode: 'user' } });
+    video.srcObject = stream; await video.play();
+    overlay.width = video.videoWidth || 640; overlay.height = video.videoHeight || 480;
+  } catch (e) {
+    statusEl.textContent = 'No camera (' + e.name + ') – use the slider or press D. Serve via http://localhost.';
+    return;
+  }
+  try {
+    statusEl.textContent = 'Loading hand model…';
+    const mp = await import('https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/vision_bundle.mjs');
+    const fileset = await mp.FilesetResolver.forVisionTasks('https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/wasm');
+    const opts = d => ({ baseOptions: { modelAssetPath:
+      'https://storage.googleapis.com/mediapipe-models/hand_landmarker/hand_landmarker/float16/1/hand_landmarker.task', delegate: d },
+      runningMode: 'VIDEO', numHands: 2 });
+    try { landmarker = await mp.HandLandmarker.createFromOptions(fileset, opts('GPU')); }
+    catch { landmarker = await mp.HandLandmarker.createFromOptions(fileset, opts('CPU')); }
+    landmarker.CONN = mp.HandLandmarker.HAND_CONNECTIONS;
+    statusEl.textContent = 'Show your hands to the camera';
+  } catch (e) {
+    statusEl.textContent = 'Hand model failed to load – use slider / D. (' + e.message + ')';
+  }
+}
+
+function drawHands(hands) {
+  octx.clearRect(0, 0, overlay.width, overlay.height);
+  const W = overlay.width, H = overlay.height;
+  for (const h of hands) {
+    octx.strokeStyle = 'rgba(255,170,210,.8)'; octx.lineWidth = 2;
+    for (const c of landmarker.CONN || []) {
+      octx.beginPath(); octx.moveTo(h.lm[c.start].x * W, h.lm[c.start].y * H);
+      octx.lineTo(h.lm[c.end].x * W, h.lm[c.end].y * H); octx.stroke();
+    }
+    octx.fillStyle = '#fff';
+    for (const p of h.lm) { octx.beginPath(); octx.arc(p.x * W, p.y * H, 3, 0, 7); octx.fill(); }
+  }
+}
+
+function trackHands() {
+  if (!landmarker || video.readyState < 2 || video.currentTime === lastVideoTime) return;
+  lastVideoTime = video.currentTime;
+  const res = landmarker.detectForVideo(video, performance.now());
+  const hands = (res.landmarks || []).map(lm => ({ lm, x: lm[0].x }));
+  drawHands(hands);
+  if (!hands.length) {
+    if (performance.now() - lastHandSeen > 1200) statusEl.textContent = 'Show your hands to the camera';
+    spinTarget = null; return;
+  }
+  lastHandSeen = performance.now(); manual = false;
+  hands.sort((a, b) => a.x - b.x);       // camera is not mirrored: smaller x = your RIGHT hand
+  const right = hands[0], left = hands.length > 1 ? hands[1] : null;
+  bloomTarget = openness(right.lm);
+  if (left) {
+    const mx = 1 - left.lm[9].x, my = left.lm[9].y;      // mirror so it feels natural
+    spinTarget = (mx - 0.5) * Math.PI * 2;
+    hue = clamp(0.93 - (1 - my) * 0.40, 0.5, 0.93);
+    statusEl.textContent = 'Two hands: bloom + spin/colour';
+  } else { spinTarget = null; statusEl.textContent = 'One hand: bloom'; }
+}
+
+/* ---------------- ui ---------------- */
+slider.addEventListener('input', () => { manual = true; debug = false; bloomTarget = slider.value / 100; });
+addEventListener('keydown', e => {
+  if (e.key === 'd' || e.key === 'D') { debug = !debug; manual = false; }
+  if (e.key === 'h' || e.key === 'H') $('hud').classList.toggle('hide');
+});
+if (location.search.includes('debug')) debug = true;
+
+function resize() {
+  const w = innerWidth, h = innerHeight;
+  renderer.setSize(w, h, false); composer.setSize(w, h);
+  bloomPass.setSize(w, h);
+  camera.aspect = w / h; camera.updateProjectionMatrix();
+}
+addEventListener('resize', resize); resize();
+
+/* ---------------- loop ---------------- */
+const clock = new THREE.Clock();
+let spin = 0, idleSpin = 0;
+function frame() {
+  const dt = Math.min(clock.getDelta(), 0.1), t = clock.elapsedTime;
+  trackHands();
+  if (debug) bloomTarget = 0.5 - 0.5 * Math.cos(t * 0.6);
+  bloom += (bloomTarget - bloom) * (1 - Math.exp(-dt * SMOOTH));
+  valEl.textContent = Math.round(bloom * 100) + '%';
+  if (!manual) slider.value = Math.round(bloom * 100);
+
+  if (Math.abs(hue - colouredHue) > 0.002) paintPetals();
+  for (const p of petals) updatePetal(p, bloom);
+
+  const sb = smooth(clamp((bloom - 0.35) / 0.55));
+  stamens.forEach(s => { s.scale.setScalar(Math.max(0.01, sb) * s.userData.size); s.rotation.z = lerp(0.05, s.userData.tilt, sb); });
+  pod.position.y = 0.16 + bloom * 0.04;
+
+  if (spinTarget !== null) { let d = spinTarget - spin; d = Math.atan2(Math.sin(d), Math.cos(d)); spin += d * (1 - Math.exp(-dt * 4)); }
+  else { idleSpin += dt * 0.15; spin += dt * 0.15; }
+  lotus.rotation.y = spin;
+  lotus.position.y = 0.45 + Math.sin(t * 1.1) * 0.012;
+
+  glow.intensity = 0.8 + bloom * 5;
+  bloomPass.strength = 0.45 + bloom * 0.6;
+  ffMat.opacity = 0.2 + bloom * 0.7;
+  const fp = ffGeo.attributes.position.array;
+  for (let i = 0; i < FF; i++) {
+    fp[i * 3 + 1] += dt * (0.08 + bloom * 0.18);
+    if (fp[i * 3 + 1] > 2.8) fp[i * 3 + 1] = 0;
+    fp[i * 3] += Math.sin(t + ffSeed[i]) * dt * 0.05;
+  }
+  ffGeo.attributes.position.needsUpdate = true;
+
+  ripples.forEach((r, i) => {
+    const u = (t * 0.18 + i / 3) % 1;
+    r.scale.setScalar(0.6 + u * 5); r.material.opacity = (1 - u) * (0.1 + bloom * 0.45);
+  });
+
+  controls.update();
+  composer.render();
+  requestAnimationFrame(frame);
+}
+frame();
+initHands();
+</script>
+</body>
+</html>
